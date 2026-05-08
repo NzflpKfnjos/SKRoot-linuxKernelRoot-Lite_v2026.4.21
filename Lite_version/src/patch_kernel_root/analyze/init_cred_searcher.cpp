@@ -2,6 +2,7 @@
 #include <vector>
 #include <string_view>
 #include <algorithm>
+#include <cstring>
 
 #define ATOMIC_INIT_4						4
 #define SECUREBITS_DEFAULT			0
