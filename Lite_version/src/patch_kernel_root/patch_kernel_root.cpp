@@ -6,6 +6,7 @@
 #include "patch_avc_denied.h"
 #include "patch_audit_log_start.h"
 #include "patch_filldir64.h"
+#include "kpm_embed.h"
 
 #include "3rdparty/find_mrs_register.h"
 #include "3rdparty/find_imm_register_offset.h"
@@ -93,7 +94,7 @@ void huawei_bypass(const std::vector<char>& file_buf, KernelSymbolOffset &sym, s
 	patch_ret_0_cmd(file_buf, sym.hkip_check_xid_root, vec_patch_bytes_data);
 }
 
-PatchKernelResult patch_kernel_handler(const std::vector<char>& file_buf, const PatchKernelOffset& off, KernelSymbolOffset& sym, std::vector<patch_bytes_data>& vec_patch_bytes_data) {
+PatchKernelResult patch_kernel_handler(const std::vector<char>& file_buf, const PatchKernelOffset& off, KernelSymbolOffset& sym, std::vector<patch_bytes_data>& vec_patch_bytes_data, size_t kpm_handler_addr = 0) {
 	KernelVersionParser kernel_ver(file_buf);
 	PatchBase patchBase(file_buf, off.cred_uid_offset, { .kti_addr = off.huawei_kti_addr });
 	PatchDoExecve patchDoExecve(patchBase, sym);
@@ -110,7 +111,7 @@ PatchKernelResult patch_kernel_handler(const std::vector<char>& file_buf, const 
 		auto start_b_location = next_empty_region.offset;
 		PATCH_AND_CONSUME(next_empty_region, 4);
 		r.root_key_start = next_empty_region.offset;
-		PATCH_AND_CONSUME(next_empty_region, patchDoExecve.patch_do_execve(next_empty_region, off.cred_offset, off.seccomp_offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(next_empty_region, patchDoExecve.patch_do_execve(next_empty_region, off.cred_offset, off.seccomp_offset, vec_patch_bytes_data, kpm_handler_addr));
 		PATCH_AND_CONSUME(next_empty_region, patchFilldir64.patch_filldir64_root_key_guide(r.root_key_start, next_empty_region, vec_patch_bytes_data));
 		PATCH_AND_CONSUME(next_empty_region, patchFilldir64.patch_filldir64_core(next_empty_region, vec_patch_bytes_data));
 		auto current_avc_check_bl_func = next_empty_region.offset;
@@ -123,7 +124,7 @@ PatchKernelResult patch_kernel_handler(const std::vector<char>& file_buf, const 
 		PATCH_AND_CONSUME(sym.__drm_printfn_coredump, patch_ret_cmd(file_buf, sym.__drm_printfn_coredump.offset, vec_patch_bytes_data));
 		PATCH_AND_CONSUME(sym.__drm_puts_coredump, patch_ret_cmd(file_buf, sym.__drm_puts_coredump.offset, vec_patch_bytes_data));
 		r.root_key_start = sym.die.offset;
-		PATCH_AND_CONSUME(sym.die, patchDoExecve.patch_do_execve(sym.die, off.cred_offset, off.seccomp_offset, vec_patch_bytes_data));
+		PATCH_AND_CONSUME(sym.die, patchDoExecve.patch_do_execve(sym.die, off.cred_offset, off.seccomp_offset, vec_patch_bytes_data, kpm_handler_addr));
 		PATCH_AND_CONSUME(sym.die, patchFilldir64.patch_filldir64_root_key_guide(r.root_key_start, sym.die, vec_patch_bytes_data));
 		PATCH_AND_CONSUME(sym.die, patchFilldir64.patch_jump(sym.die.offset, sym.__drm_puts_coredump.offset, vec_patch_bytes_data));
 		PATCH_AND_CONSUME(sym.__drm_puts_coredump, patchFilldir64.patch_filldir64_core(sym.__drm_puts_coredump, vec_patch_bytes_data));
@@ -249,8 +250,88 @@ int main(int argc, char* argv[]) {
 	cfi_bypass(file_buf, sym, vec_patch_bytes_data);
 	huawei_bypass(file_buf, sym, vec_patch_bytes_data);
 
+	/* === KPM Loader Integration === */
+	size_t kpm_handler_addr = 0;
+	{
+		KernelSymbolParser sym_parser(file_buf);
+		sym_parser.init_kallsyms_lookup_name();
+		uint64_t _km_addr = sym_parser.kallsyms_lookup_name("__kmalloc");
+		if (!_km_addr) _km_addr = sym_parser.kallsyms_lookup_name("kmalloc");
+		uint64_t _kf_addr = sym_parser.kallsyms_lookup_name("kfree");
+		uint64_t _pk_addr = sym_parser.kallsyms_lookup_name("printk");
+		if (!_pk_addr) _pk_addr = sym_parser.kallsyms_lookup_name("_printk");
+
+		if (_km_addr && _kf_addr && _pk_addr) {
+			uint64_t _vm_addr = sym_parser.kallsyms_lookup_name("vmalloc");
+			if (!_vm_addr) _vm_addr = sym_parser.kallsyms_lookup_name("__vmalloc");
+			uint64_t _vf_addr = sym_parser.kallsyms_lookup_name("vfree");
+			uint64_t _ms_addr = sym_parser.kallsyms_lookup_name("memset");
+			uint64_t _mc_addr = sym_parser.kallsyms_lookup_name("memcpy");
+			uint64_t _sct_addr = sym_parser.kallsyms_lookup_name("sys_call_table");
+			uint64_t _it_addr = sym_parser.kallsyms_lookup_name("init_task");
+			uint64_t _fo_addr = sym_parser.kallsyms_lookup_name("filp_open");
+			uint64_t _kr_addr = sym_parser.kallsyms_lookup_name("kernel_read");
+			if (!_kr_addr) _kr_addr = sym_parser.kallsyms_lookup_name("__kernel_read");
+			uint64_t _fc_addr = sym_parser.kallsyms_lookup_name("filp_close");
+
+			std::cout << std::endl << "=== KPM Loader Integration ===" << std::endl;
+
+			SymbolRegion kpm_region = {0, 0};
+			auto check_r = [&](SymbolRegion r) { if (r.size > kpm_region.size) kpm_region = r; };
+			if (sym.__cfi_check.valid()) check_r(sym.__cfi_check);
+			if (sym.die.valid()) check_r(sym.die);
+			if (sym.__drm_puts_coredump.valid()) check_r(sym.__drm_puts_coredump);
+			if (sym.__drm_printfn_coredump.valid()) check_r(sym.__drm_printfn_coredump);
+
+			if (kpm_region.size >= 0x4000) {
+				KpmEmbedConfig kcfg{};
+				kcfg.kernel_file_buf = &file_buf;
+				kcfg.cred_offset = off.cred_offset;
+				kcfg.cred_uid_offset = off.cred_uid_offset;
+				kcfg.seccomp_offset = off.seccomp_offset;
+
+				PatchBase tmpBase(file_buf, off.cred_uid_offset,
+					{ .kti_addr = off.huawei_kti_addr });
+				kcfg.thread_info_in_task = tmpBase.is_CONFIG_THREAD_INFO_IN_TASK();
+				kcfg.sp_el0_is_current = kcfg.thread_info_in_task;
+				kcfg.sp_el0_is_thread_info = tmpBase.is_CURRENT_FROM_SP_EL0_THREAD_INFO();
+
+				KernelVersionParser kvp(file_buf);
+				kcfg.has_syscall_wrapper = !kvp.is_kernel_version_less("4.17.0");
+				kcfg.kernel_version_str = nullptr;
+				kcfg.kallsyms_lookup_name_addr = 0;
+				kcfg.kmalloc_addr = _km_addr;
+				kcfg.kfree_addr = _kf_addr;
+				kcfg.vmalloc_addr = _vm_addr;
+				kcfg.vfree_addr = _vf_addr;
+				kcfg.memset_addr = _ms_addr;
+				kcfg.memcpy_addr = _mc_addr;
+				kcfg.printk_addr = _pk_addr;
+				kcfg.syscall_table_addr = _sct_addr;
+				kcfg.init_task_addr = _it_addr;
+				kcfg.filp_open_addr = _fo_addr;
+				kcfg.kernel_read_addr = _kr_addr;
+				kcfg.filp_close_addr = _fc_addr;
+				kcfg.kti_addr = off.huawei_kti_addr;
+
+				KpmEmbedResult kr = kpm_embed_loader(kcfg, kpm_region);
+				if (kr.success) {
+					for (auto& p : kr.patches)
+						vec_patch_bytes_data.push_back(p);
+					kpm_handler_addr = kr.command_handler_addr;
+					std::cout << "KPM handler: 0x" << std::hex
+						<< kr.command_handler_addr << std::endl;
+				}
+			} else {
+				std::cout << "[WARN] Not enough kernel space for KPM loader" << std::endl;
+			}
+		} else {
+			std::cout << "[WARN] KPM loader skipped: missing kernel API symbols" << std::endl;
+		}
+	}
+
 	size_t first_hook_start = 0;
-	PatchKernelResult pr = patch_kernel_handler(file_buf, off, sym, vec_patch_bytes_data);
+	PatchKernelResult pr = patch_kernel_handler(file_buf, off, sym, vec_patch_bytes_data, kpm_handler_addr);
 	if (!pr.patched) {
 		std::cout << "Failed to find hook start addr" << std::endl;
 		system("pause");

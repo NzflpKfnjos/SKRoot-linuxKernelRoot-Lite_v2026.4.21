@@ -17,8 +17,10 @@ public:
 	PatchDoExecve(const PatchBase& patch_base, const KernelSymbolOffset &sym);
 	~PatchDoExecve();
 
-	size_t patch_do_execve(const SymbolRegion& hook_func_start_region, size_t task_struct_cred_offset, size_t task_struct_seccomp_offset,
-		std::vector<patch_bytes_data>& vec_out_patch_bytes_data);
+	size_t patch_do_execve(const SymbolRegion& hook_func_start_region,
+		size_t task_struct_cred_offset, size_t task_struct_seccomp_offset,
+		std::vector<patch_bytes_data>& vec_out_patch_bytes_data,
+		size_t kpm_handler_addr = 0);
 
 private:
 	void init_do_execve_param(const KernelSymbolOffset& sym);

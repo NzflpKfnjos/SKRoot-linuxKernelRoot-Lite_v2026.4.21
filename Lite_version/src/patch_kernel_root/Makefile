@@ -115,7 +115,9 @@ PROJECT_SRCS := \
   patch_base.cpp \
   patch_do_execve.cpp \
   patch_filldir64.cpp \
-  patch_kernel_root.cpp
+  patch_kernel_root.cpp \
+  kpm_embed.cpp \
+  kpm_command.cpp
 
 SRCS_CPP := $(ASMJIT_SRCS)  $(CJSON_SRCS) $(PROJECT_SRCS)
 SRCS_C   := $(CAPSTONE_SRCS)
@@ -124,10 +126,17 @@ OBJS_CPP := $(SRCS_CPP:.cpp=.o)
 OBJS_C   := $(SRCS_C:.c=.o)
 OBJS     := $(OBJS_CPP) $(OBJS_C)
 
-all: $(TARGET)
+KPM_HDR := kpm/kpm_loader_data.h
+
+all: kpm_build $(TARGET)
+
+kpm_build:
+	$(MAKE) -C kpm
 
 $(TARGET): $(OBJS)
 	$(CXX) -o $@ $^ $(LIBS)
+
+kpm_embed.o: $(KPM_HDR)
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@

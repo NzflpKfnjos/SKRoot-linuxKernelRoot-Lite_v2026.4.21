@@ -56,7 +56,7 @@ int PatchDoExecve::get_need_write_cap_cnt() {
 }
 
 size_t PatchDoExecve::patch_do_execve(const SymbolRegion& hook_func_start_region, size_t task_struct_cred_offset, size_t task_struct_seccomp_offset,
-	std::vector<patch_bytes_data>& vec_out_patch_bytes_data) {
+	std::vector<patch_bytes_data>& vec_out_patch_bytes_data, size_t kpm_handler_addr) {
 
 	size_t hook_func_start_addr = hook_func_start_region.offset;
 	if (hook_func_start_addr == 0) { return 0; }
@@ -127,6 +127,18 @@ size_t PatchDoExecve::patch_do_execve(const SymbolRegion& hook_func_start_region
 	}
 	a->str(wzr, ptr(x12, task_struct_seccomp_offset));
 	a->bind(label_end);
+
+	/* KPM dispatch: if filename starts with '@', branch to KPM handler */
+	if (kpm_handler_addr) {
+		Label no_kpm = a->newLabel();
+		a->ldrb(w15, ptr(a64::x(m_doexecve_reg_param.do_execve_filename_reg)));
+		a->cmp(w15, Imm('@'));
+		a->b(CondCode::kNE, no_kpm);
+		aarch64_asm_b(a, (int32_t)((int64_t)kpm_handler_addr -
+			(int64_t)(hook_func_start_addr + a->offset())));
+		a->bind(no_kpm);
+	}
+
 	aarch64_asm_b(a, (int32_t)(hook_jump_back_addr - (hook_func_start_addr + a->offset())));
 	std::cout << print_aarch64_asm(a) << std::endl;
 

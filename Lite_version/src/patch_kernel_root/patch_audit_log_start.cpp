@@ -5,7 +5,7 @@ using namespace asmjit;
 using namespace asmjit::a64;
 using namespace asmjit::a64::Predicate;
 
-PatchAuditLogStart::PatchAuditLogStart(const PatchBase& patch_base, uint64_t audit_log_start) : PatchBase(patch_base) {
+PatchAuditLogStart::PatchAuditLogStart(const PatchBase& patch_base, size_t audit_log_start) : PatchBase(patch_base) {
 	m_audit_log_start_orig_entry_insn = *(uint32_t*)&m_file_buf[audit_log_start];
 	m_audit_log_start = skip_pac_bti_at_func_start(audit_log_start);
 }

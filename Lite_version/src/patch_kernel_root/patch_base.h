@@ -26,10 +26,10 @@ public:
 	~PatchBase();
 	uint32_t skip_pac_bti_at_func_start(uint32_t addr);
 	size_t patch_jump(size_t patch_addr, size_t jump_addr, std::vector<patch_bytes_data>& vec_out_patch_bytes_data);
-
-protected:
 	bool is_CONFIG_THREAD_INFO_IN_TASK();
 	bool is_CURRENT_FROM_SP_EL0_THREAD_INFO();
+
+protected:
 	void emit_get_current(asmjit::a64::Assembler* a, asmjit::a64::GpX x);
 	void emit_safe_bl(asmjit::a64::Assembler* a, size_t func_base_addr, size_t target);
 	void emit_ret_by_entry_insn(asmjit::a64::Assembler* a, uint32_t entry_insn);

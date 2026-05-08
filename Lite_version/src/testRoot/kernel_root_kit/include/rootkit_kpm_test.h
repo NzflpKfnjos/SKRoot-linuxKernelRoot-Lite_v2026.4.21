@@ -51,4 +51,26 @@ KRootErr kpm_unload_by_name(const char* root_key, const char* module_name, KpmTe
 std::string format_kpm_elf_info(const KpmElfInfo& info);
 const char* get_kpm_compat_report(const char* root_key, const char* kpm_path);
 
+/* === SKRoot Self-Hosted KPM Runtime === */
+
+struct SkrootKpmInfo {
+    std::string name;
+    std::string version;
+    bool operator<(const SkrootKpmInfo& o) const { return name < o.name; }
+};
+
+/* Probe whether the kernel has SKRoot KPM runtime support */
+KRootErr skroot_kpm_probe(const char* root_key, bool& out_available);
+
+/* Load a .kpm file using the self-hosted KPM loader in kernel */
+KRootErr skroot_kpm_load(const char* root_key, const char* kpm_path,
+                         std::string& out_module_name);
+
+/* Unload a KPM module by name */
+KRootErr skroot_kpm_unload(const char* root_key, const char* module_name);
+
+/* List loaded KPM modules */
+KRootErr skroot_kpm_list(const char* root_key,
+                         std::vector<SkrootKpmInfo>& out_modules);
+
 }
