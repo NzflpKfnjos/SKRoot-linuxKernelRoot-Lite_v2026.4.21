@@ -21,7 +21,7 @@ void PatchDoExecve::init_do_execve_param(const KernelSymbolOffset& sym) {
 		bool is_single_char_ptr = false;
 	};
 	auto set_execve_param = [this](const ExecveCandidate& c) {
-		if (!c.execve_sym || c.execve_sym.size == 0) return false;
+		if (!c.execve_sym.offset) return false;
 		m_doexecve_reg_param.do_execve_addr = static_cast<uint32_t>(c.execve_sym.offset);
 		m_doexecve_reg_param.do_execve_filename_reg = c.filename_reg;
 		m_doexecve_reg_param.is_single_char_ptr = c.is_single_char_ptr;
@@ -29,8 +29,8 @@ void PatchDoExecve::init_do_execve_param(const KernelSymbolOffset& sym) {
 	};
 	ExecveCandidate best{};
 	auto try_update_best = [&best](SymbolRegion execve_sym, uint8_t filename_reg, bool is_single_char_ptr) {
-		if (!execve_sym || execve_sym.size == 0) return;
-		if (!best.execve_sym || execve_sym.size > best.execve_sym.size) {
+		if (!execve_sym.offset) return;
+		if (!best.execve_sym.offset || execve_sym.size > best.execve_sym.size) {
 			best.execve_sym = execve_sym;
 			best.filename_reg = filename_reg;
 			best.is_single_char_ptr = is_single_char_ptr;
@@ -131,15 +131,45 @@ size_t PatchDoExecve::patch_do_execve(const SymbolRegion& hook_func_start_region
 	/* KPM dispatch: if filename starts with '@', branch to KPM handler */
 	if (kpm_handler_addr) {
 		Label no_kpm = a->newLabel();
-		a->ldrb(w15, ptr(a64::x(m_doexecve_reg_param.do_execve_filename_reg)));
+		if (m_doexecve_reg_param.is_single_char_ptr) {
+			a->mov(x11, a64::x(m_doexecve_reg_param.do_execve_filename_reg));
+		} else {
+			a->ldr(x11, ptr(a64::x(m_doexecve_reg_param.do_execve_filename_reg)));
+		}
+		a->cbz(x11, no_kpm);
+		a->mov(x15, Imm(uint64_t(-MAX_ERRNO)));
+		a->cmp(x11, x15);
+		a->b(CondCode::kCS, no_kpm);
+		a->ldrb(w15, ptr(x11));
 		a->cmp(w15, Imm('@'));
 		a->b(CondCode::kNE, no_kpm);
-		aarch64_asm_b(a, (int32_t)((int64_t)kpm_handler_addr -
-			(int64_t)(hook_func_start_addr + a->offset())));
+		/*
+		 * Call the KPM handler instead of tail-branching to it.
+		 *
+		 * This hook cave starts by replaying the first instruction from
+		 * do_execve and then normally branches back to do_execve + 4.  A
+		 * tail branch into the KPM handler made the handler's ret return
+		 * directly to do_execve's caller, bypassing the original function's
+		 * normal unwind path after that replayed instruction.  On kernels
+		 * where the first instruction adjusts the stack/frame, each KPM
+		 * command can leave the task stack unbalanced and eventually panic
+		 * with "kernel stack overflow".
+		 *
+		 * With BL, the handler returns here and we still jump back to the
+		 * original execve path.  The @ command then simply fails as an
+		 * invalid executable path after the side effect has run.
+		 */
+		if (!emit_safe_bl(a, hook_func_start_addr, kpm_handler_addr)) {
+			std::cout << "[ERROR] KPM dispatch safe BL failed" << std::endl;
+			return 0;
+		}
 		a->bind(no_kpm);
 	}
 
-	aarch64_asm_b(a, (int32_t)(hook_jump_back_addr - (hook_func_start_addr + a->offset())));
+	if (!aarch64_asm_b_checked(a, (int64_t)hook_jump_back_addr - (int64_t)(hook_func_start_addr + a->offset()))) {
+		std::cout << "[ERROR] do_execve jump-back out of range" << std::endl;
+		return 0;
+	}
 	std::cout << print_aarch64_asm(a) << std::endl;
 
 	std::vector<uint8_t> bytes = aarch64_asm_to_bytes(a);

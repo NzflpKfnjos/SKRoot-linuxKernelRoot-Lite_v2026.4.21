@@ -109,6 +109,20 @@ bool aarch64_asm_b(Assembler* a, int32_t b_value) {
 	return true;
 }
 
+bool aarch64_asm_b_checked(Assembler* a, int64_t b_value) {
+	if (!a) return false;
+	if ((b_value & 3) != 0) {
+		std::cout << "[发生错误] The B instruction offset must be a multiple of 4" << std::endl;
+		return false;
+	}
+	int64_t imm26 = b_value >> 2;
+	if (imm26 < -(1LL << 25) || imm26 >= (1LL << 25)) {
+		std::cout << "[发生错误] B instruction offset exceeds ± 128MB range" << std::endl;
+		return false;
+	}
+	return aarch64_asm_b(a, static_cast<int32_t>(b_value));
+}
+
 /******************************************************************
  * 生成一条 BL 指令（相对 PC 跳转）
  * 参数：a       : Assembler 指针；

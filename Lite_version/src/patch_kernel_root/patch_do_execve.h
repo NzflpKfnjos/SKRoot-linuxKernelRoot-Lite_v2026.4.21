@@ -16,6 +16,8 @@ class PatchDoExecve : public PatchBase
 public:
 	PatchDoExecve(const PatchBase& patch_base, const KernelSymbolOffset &sym);
 	~PatchDoExecve();
+	uint8_t get_execve_filename_reg() const { return m_doexecve_reg_param.do_execve_filename_reg; }
+	bool is_execve_filename_direct() const { return m_doexecve_reg_param.is_single_char_ptr; }
 
 	size_t patch_do_execve(const SymbolRegion& hook_func_start_region,
 		size_t task_struct_cred_offset, size_t task_struct_seccomp_offset,

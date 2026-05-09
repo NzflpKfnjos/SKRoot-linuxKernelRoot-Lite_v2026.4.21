@@ -1,10 +1,29 @@
 #include "kpm_embed.h"
 #include "analyze/base_func.h"
 #include "3rdparty/aarch64_asm_helper.h"
+#include "3rdparty/aarch64_reg_protect_guard.h"
+
+#ifndef MAX_ERRNO
+#define MAX_ERRNO 4095
+#endif
 
 using namespace asmjit;
 using namespace asmjit::a64;
 using namespace asmjit::a64::Predicate;
+
+static bool emit_checked_bl(Assembler* a, int64_t offset) {
+    if (!a) return false;
+    if ((offset & 3) != 0) {
+        std::cout << "[ERROR] BL offset must be a multiple of 4" << std::endl;
+        return false;
+    }
+    int64_t imm26 = offset >> 2;
+    if (imm26 < -(1LL << 25) || imm26 >= (1LL << 25)) {
+        std::cout << "[ERROR] BL offset out of range" << std::endl;
+        return false;
+    }
+    return aarch64_asm_bl_raw(a, static_cast<int32_t>(offset));
+}
 
 /*
  * Generate the '@' command prefix check to be inserted into the do_execve hook.
@@ -35,8 +54,12 @@ std::vector<patch_bytes_data> kpm_generate_execve_dispatch(
     auto a = asm_ctx.assembler();
     Label fallthrough = a->newLabel();
 
-    /* Load first byte of filename */
-    a->ldrb(w15, ptr(a64::x(filename_reg)));
+    a->mov(x11, a64::x(filename_reg));
+    a->cbz(x11, fallthrough);
+    a->mov(x15, Imm(uint64_t(-MAX_ERRNO)));
+    a->cmp(x11, x15);
+    a->b(CondCode::kCS, fallthrough);
+    a->ldrb(w15, ptr(x11));
 
     /* Compare with '@' */
     a->cmp(w15, Imm('@'));
@@ -44,9 +67,20 @@ std::vector<patch_bytes_data> kpm_generate_execve_dispatch(
     /* If not '@', fall through to original execve */
     a->b(CondCode::kNE, fallthrough);
 
-    /* It's a KPM command — branch to the handler */
-    int64_t b_offset = (int64_t)kpm_handler_addr - (int64_t)(insert_addr + a->offset());
-    aarch64_asm_b(a, (int32_t)b_offset);
+    /*
+     * It's a KPM command: call the handler, then fall back to the original
+     * execve path.  Do not tail-branch here; the hook cave may already have
+     * replayed do_execve's first instruction, and returning directly from the
+     * handler can leave the original function's stack/frame state unbalanced.
+     */
+    {
+        RegProtectGuard guard(a, x29, x30);
+        int64_t bl_offset = (int64_t)kpm_handler_addr - (int64_t)(insert_addr + a->offset());
+        if (!emit_checked_bl(a, bl_offset)) {
+            std::cout << "[ERROR] KPM dispatch BL out of range" << std::endl;
+            return result;
+        }
+    }
 
     a->bind(fallthrough);
     /* nop placeholder — caller will append their original jump-back here */
@@ -65,15 +99,17 @@ std::vector<patch_bytes_data> kpm_generate_execve_dispatch(
  * Generate the KPM command handler wrapper shellcode.
  *
  * This is a trampoline placed at the KPM handler address that:
- *   1. Saves the execve context (filename reg, return address)
+ *   1. Saves the execve context (return address and volatile args)
  *   2. Sets up the call to kpm_main():
  *      x0 = pointer to KpmSystemTable
  *      x1 = command type (0=LOAD, 1=UNLOAD, 2=LIST)
- *      x2 = the filename string (from execve)
+ *      x2 = the command string pointer supplied by dispatch in x11
  *      x3 = 0
  *   3. Calls kpm_main entry point
  *   4. Restores context and returns
  *
+ * The do_execve hook normalizes direct and indirect filename variants before
+ * branching here.  Keep this ABI narrow: x11 is the command string pointer.
  * The kpm_main C function parses the command string and handles everything.
  *
  * Parameters:
@@ -83,11 +119,14 @@ std::vector<patch_bytes_data> kpm_generate_execve_dispatch(
  */
 std::vector<patch_bytes_data> kpm_generate_handler_wrapper(
     int filename_reg,
+    bool filename_is_direct,
     size_t handler_addr,
     size_t system_table_addr,
     size_t loader_entry_addr)
 {
     std::vector<patch_bytes_data> result;
+    (void)filename_reg;
+    (void)filename_is_direct;
 
     aarch64_asm_ctx asm_ctx = init_aarch64_asm();
     auto a = asm_ctx.assembler();
@@ -100,18 +139,23 @@ std::vector<patch_bytes_data> kpm_generate_handler_wrapper(
     a->stp(x0, x1, ptr(sp).pre(-16));
     a->stp(x2, x3, ptr(sp).pre(-16));
     a->stp(x4, x5, ptr(sp).pre(-16));
+    a->stp(x6, x7, ptr(sp).pre(-16));
+    a->stp(x10, x11, ptr(sp).pre(-16));
 
     /* x0 = &system_table (via ADRP + ADD) */
     {
         uint64_t cur_addr = handler_addr + a->offset();
-        aarch64_asm_adrp_add_x(a, x0, cur_addr, system_table_addr);
+        if (!aarch64_asm_adrp_add_x(a, x0, cur_addr, system_table_addr)) {
+            std::cout << "[ERROR] KPM handler system table ADRP out of range" << std::endl;
+            return result;
+        }
     }
 
     /* x1 = 0 (command type — let C code parse from filename) */
     a->mov(x1, xzr);
 
-    /* x2 = filename pointer (restore from saved regs) */
-    a->mov(x2, a64::x(filename_reg));
+    /* x2 = command string pointer normalized by the dispatch code */
+    a->mov(x2, x11);
 
     /* x3 = 0 */
     a->mov(x3, xzr);
@@ -120,13 +164,15 @@ std::vector<patch_bytes_data> kpm_generate_handler_wrapper(
     {
         size_t bl_addr = handler_addr + a->offset();
         int64_t diff = (int64_t)loader_entry_addr - (int64_t)bl_addr;
-        if (!aarch64_asm_bl_raw(a, (int32_t)diff)) {
+        if (!emit_checked_bl(a, diff)) {
             std::cout << "[ERROR] KPM handler BL out of range" << std::endl;
             return result;
         }
     }
 
     /* Restore saved regs */
+    a->ldp(x10, x11, ptr(sp).post(16));
+    a->ldp(x6, x7, ptr(sp).post(16));
     a->ldp(x4, x5, ptr(sp).post(16));
     a->ldp(x2, x3, ptr(sp).post(16));
     a->ldp(x0, x1, ptr(sp).post(16));

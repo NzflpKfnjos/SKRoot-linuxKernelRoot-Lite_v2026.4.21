@@ -16,6 +16,7 @@ public:
 	uint64_t kallsyms_lookup_name(const char* name) override;
 	uint64_t kallsyms_symbol_size(uint64_t cur_addr) override;
 	std::unordered_map<std::string, uint64_t> kallsyms_on_each_symbol() override;
+	uint64_t kernel_base() const override { return m_kallsyms_relative_base; }
 
 private:
 	bool find_kallsyms_addresses_list(std::vector<std::pair<uint64_t, uint64_t>>& addresses);

@@ -46,6 +46,7 @@ bool SymbolAnalyze::find_symbol_offset() {
 	};
 	m_sym_offset._text = find_addr({{"_text", false}});
 	m_sym_offset._stext = find_addr({{"_stext", false}});
+	m_sym_offset._etext = find_addr({{"_etext", false}});
 	m_sym_offset.die = find_region({{"die", false}});
 	m_sym_offset.__drm_puts_coredump = find_region({ {"__drm_puts_coredump", false} });
 	m_sym_offset.__drm_printfn_coredump = find_region({ {"__drm_printfn_coredump", false} });
@@ -107,6 +108,7 @@ bool SymbolAnalyze::find_symbol_offset() {
 void SymbolAnalyze::printf_symbol_offset() {
 	std::cout << "_text:" << m_sym_offset._text << std::endl;
 	std::cout << "_stext:" << m_sym_offset._stext << std::endl;
+	std::cout << "_etext:" << m_sym_offset._etext << std::endl;
 	if (m_sym_offset.die) std::cout << "die:" << m_sym_offset.die.offset << ", size:" << m_sym_offset.die.size << std::endl;
 	if (m_sym_offset.__drm_puts_coredump) std::cout << "__drm_puts_coredump:" << m_sym_offset.__drm_puts_coredump.offset << ", size:" << m_sym_offset.__drm_printfn_coredump.size << std::endl;
 	if (m_sym_offset.__drm_printfn_coredump) std::cout << "__drm_printfn_coredump:" << m_sym_offset.__drm_printfn_coredump.offset << ", size:" << m_sym_offset.__drm_printfn_coredump.size << std::endl;

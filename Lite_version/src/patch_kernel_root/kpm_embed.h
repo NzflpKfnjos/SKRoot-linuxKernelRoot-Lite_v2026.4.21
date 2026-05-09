@@ -15,8 +15,11 @@ struct KpmEmbedConfig {
     int sp_el0_is_current;
     int sp_el0_is_thread_info;
     int has_syscall_wrapper;
+    int execve_filename_reg;
+    int execve_filename_is_direct;
     const char* kernel_version_str;
     uint64_t kallsyms_lookup_name_addr;
+    uint64_t kernel_va_base;
     uint64_t kmalloc_addr;
     uint64_t kfree_addr;
     uint64_t vmalloc_addr;
@@ -29,6 +32,7 @@ struct KpmEmbedConfig {
     uint64_t filp_open_addr;
     uint64_t kernel_read_addr;
     uint64_t filp_close_addr;
+    uint64_t copy_from_user_addr;
     uint64_t kti_addr;
 };
 
@@ -47,3 +51,5 @@ struct KpmEmbedResult {
  */
 KpmEmbedResult kpm_embed_loader(const KpmEmbedConfig& config,
                                 const SymbolRegion& available_region);
+
+size_t kpm_required_space();

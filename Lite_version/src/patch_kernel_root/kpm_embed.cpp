@@ -12,7 +12,7 @@ using namespace asmjit::a64;
 
 /* Forward declaration from kpm_command.cpp */
 extern std::vector<patch_bytes_data> kpm_generate_handler_wrapper(
-    int filename_reg, size_t handler_addr,
+    int filename_reg, bool filename_is_direct, size_t handler_addr,
     size_t system_table_addr, size_t loader_entry_addr);
 
 /* Total size needed in kernel memory:
@@ -21,24 +21,50 @@ extern std::vector<patch_bytes_data> kpm_generate_handler_wrapper(
  * + KpmSystemTable (sizeof(kpm_system_table) + alignment)
  */
 #define KPM_WRAPPER_ESTIMATE  512
-#define KPM_TOTAL_NEEDED  (KPM_WRAPPER_ESTIMATE + KPM_LOADER_BIN_SIZE + sizeof(kpm_system_table) + 64)
+/*
+ * kpm_loader.elf is linked as a flat image at VMA 0 and contains AArch64 ADRP
+ * references between .text/.rodata/.got.  ADRP is page-relative, so relocating
+ * the already-linked flat image to an arbitrary 8-byte aligned address is not
+ * safe: if the runtime base has a non-zero 4 KiB page offset, page(symbol) -
+ * page(PC) can differ from the link-time value and rodata/GOT accesses become
+ * shifted/corrupted.
+ *
+ * Keep the embedded loader image 4 KiB aligned in the kernel code cave.  The
+ * extra 0x1000 slack covers the worst-case padding from the handler wrapper to
+ * the next page boundary.
+ */
+#define KPM_LOADER_ALIGN      0x1000ULL
+#define KPM_TOTAL_NEEDED  (KPM_WRAPPER_ESTIMATE + (KPM_LOADER_ALIGN - 1) + KPM_LOADER_BIN_SIZE + sizeof(kpm_system_table) + 64)
+
+size_t kpm_required_space() {
+    return KPM_TOTAL_NEEDED;
+}
 
 static void embed_system_table_bytes(const KpmEmbedConfig& config,
                                      std::vector<patch_bytes_data>& out,
-                                     size_t table_addr) {
+                                     size_t table_addr,
+                                     size_t loader_bin_addr) {
     kpm_system_table sys;
     memset(&sys, 0, sizeof(sys));
 
-    sys.kallsyms_lookup_name = (void* (*)(const char*))(unsigned long)config.kallsyms_lookup_name_addr;
-    sys.kmalloc       = (void* (*)(unsigned long, unsigned int))(unsigned long)config.kmalloc_addr;
-    sys.kfree         = (void  (*)(const void*))(unsigned long)config.kfree_addr;
-    sys.vmalloc       = (void* (*)(unsigned long))(unsigned long)config.vmalloc_addr;
-    sys.vfree         = (void  (*)(const void*))(unsigned long)config.vfree_addr;
-    sys.memset_impl   = (void* (*)(void*, int, unsigned long))(unsigned long)config.memset_addr;
-    sys.memcpy_impl   = (void* (*)(void*, const void*, unsigned long))(unsigned long)config.memcpy_addr;
-    sys.printk        = (int   (*)(const char*, ...))(unsigned long)config.printk_addr;
-    sys.syscall_table = (void*)(unsigned long)config.syscall_table_addr;
-    sys.init_task     = (void*)(unsigned long)config.init_task_addr;
+    auto kva = [&](uint64_t addr) -> uint64_t {
+        if (!addr) return 0;
+        if (config.kernel_va_base && addr < config.kernel_file_buf->size()) {
+            return config.kernel_va_base + addr;
+        }
+        return addr;
+    };
+
+    sys.kallsyms_lookup_name = (void* (*)(const char*))(unsigned long)kva(config.kallsyms_lookup_name_addr);
+    sys.kmalloc       = (void* (*)(unsigned long, unsigned int))(unsigned long)kva(config.kmalloc_addr);
+    sys.kfree         = (void  (*)(const void*))(unsigned long)kva(config.kfree_addr);
+    sys.vmalloc       = (void* (*)(unsigned long))(unsigned long)kva(config.vmalloc_addr);
+    sys.vfree         = (void  (*)(const void*))(unsigned long)kva(config.vfree_addr);
+    sys.memset_impl   = (void* (*)(void*, int, unsigned long))(unsigned long)kva(config.memset_addr);
+    sys.memcpy_impl   = (void* (*)(void*, const void*, unsigned long))(unsigned long)kva(config.memcpy_addr);
+    sys.printk        = (int   (*)(const char*, ...))(unsigned long)kva(config.printk_addr);
+    sys.syscall_table = (void*)(unsigned long)kva(config.syscall_table_addr);
+    sys.init_task     = (void*)(unsigned long)kva(config.init_task_addr);
     sys.cred_offset   = config.cred_offset;
     sys.mm_struct_offset = 0;
     sys.task_in_thread_info_offset = offsetof(thread_info, task);
@@ -49,13 +75,15 @@ static void embed_system_table_bytes(const KpmEmbedConfig& config,
     sys.sp_el0_is_thread_info  = config.sp_el0_is_thread_info;
     sys.thread_info_in_task    = config.thread_info_in_task;
     sys.has_syscall_wrapper    = config.has_syscall_wrapper;
-    sys.kver           = config.kernel_version_str;
+    sys.kver           = (const char*)(unsigned long)kva((uint64_t)(unsigned long)config.kernel_version_str);
     sys.kpm_module_list_head = 0;
-    sys.filp_open_fn   = (void* (*)(const char*, int, unsigned short))(unsigned long)config.filp_open_addr;
-    sys.kernel_read_fn = (long  (*)(void*, void*, unsigned long, unsigned long long*))(unsigned long)config.kernel_read_addr;
-    sys.filp_close_fn  = (int   (*)(void*, void*))(unsigned long)config.filp_close_addr;
-    sys.loader_base    = (void*)0;  /* filled at runtime */
+    sys.filp_open_fn   = (void* (*)(const char*, int, unsigned short))(unsigned long)kva(config.filp_open_addr);
+    sys.kernel_read_fn = (long  (*)(void*, void*, unsigned long, unsigned long long*))(unsigned long)kva(config.kernel_read_addr);
+    sys.filp_close_fn  = (int   (*)(void*, void*))(unsigned long)kva(config.filp_close_addr);
+    sys.copy_from_user_fn = (unsigned long (*)(void*, const void*, unsigned long))(unsigned long)kva(config.copy_from_user_addr);
+    sys.loader_base    = (void*)(unsigned long)kva(loader_bin_addr);
     sys.loader_size    = KPM_LOADER_BIN_SIZE;
+    sys.loader_entry_offset = KPM_LOADER_ENTRY_OFFSET;
 
     std::string str_bytes = bytes2hex((const unsigned char*)&sys, sizeof(sys));
     out.push_back({ str_bytes, table_addr });
@@ -78,17 +106,21 @@ KpmEmbedResult kpm_embed_loader(const KpmEmbedConfig& config,
 
     /* Layout:
      *   base_addr + 0                        → handler wrapper
-     *   base_addr + KPM_WRAPPER_ESTIMATE     → loader binary (aligned)
+     *   next 4 KiB boundary after wrapper    → loader binary
      *   loader_bin_addr + KPM_LOADER_BIN_SIZE → system table (8-byte aligned)
      */
     size_t base_addr = available_region.offset;
-    size_t loader_bin_addr = (base_addr + KPM_WRAPPER_ESTIMATE + 7) & ~7ULL;
+    size_t loader_bin_addr = (base_addr + KPM_WRAPPER_ESTIMATE + (KPM_LOADER_ALIGN - 1)) & ~(KPM_LOADER_ALIGN - 1);
     size_t system_table_addr = (loader_bin_addr + KPM_LOADER_BIN_SIZE + 7) & ~7ULL;
 
     std::cout << "KPM loader embedding:" << std::endl;
     std::cout << "  handler:     0x" << std::hex << base_addr << std::endl;
+    size_t loader_entry_addr = loader_bin_addr + KPM_LOADER_ENTRY_OFFSET;
+
     std::cout << "  loader:      0x" << loader_bin_addr
               << " (" << std::dec << KPM_LOADER_BIN_SIZE << " bytes)" << std::endl;
+    std::cout << "  entry:       0x" << std::hex << loader_entry_addr
+              << " (offset 0x" << KPM_LOADER_ENTRY_OFFSET << ")" << std::endl;
     std::cout << "  system tbl:  0x" << std::hex << system_table_addr
               << " (" << std::dec << sizeof(kpm_system_table) << " bytes)" << std::endl;
 
@@ -98,11 +130,25 @@ KpmEmbedResult kpm_embed_loader(const KpmEmbedConfig& config,
      * For older kernels: do_execve: filename in x0
      * We default to x0 and adjust based on the config.
      */
-    int filename_reg = 0; /* x0 — most common */
+    int filename_reg = config.execve_filename_reg;
+    bool filename_is_direct = config.execve_filename_is_direct != 0;
     auto handler_patches = kpm_generate_handler_wrapper(
-        filename_reg, base_addr, system_table_addr, loader_bin_addr);
+        filename_reg, filename_is_direct, base_addr, system_table_addr, loader_entry_addr);
     if (handler_patches.empty()) {
         std::cout << "[ERROR] Failed to generate KPM handler wrapper" << std::endl;
+        return result;
+    }
+    for (const auto& p : handler_patches) {
+        size_t patch_size = p.str_bytes.length() / 2;
+        if (p.write_addr < base_addr || p.write_addr > loader_bin_addr || patch_size > loader_bin_addr - p.write_addr) {
+            std::cout << "[ERROR] KPM handler wrapper overlaps loader" << std::endl;
+            return result;
+        }
+    }
+    if (system_table_addr < available_region.offset ||
+        system_table_addr - available_region.offset > available_region.size ||
+        sizeof(kpm_system_table) > available_region.size - (system_table_addr - available_region.offset)) {
+        std::cout << "[ERROR] KPM layout exceeds selected code cave" << std::endl;
         return result;
     }
     for (auto& p : handler_patches) result.patches.push_back(p);
@@ -114,7 +160,7 @@ KpmEmbedResult kpm_embed_loader(const KpmEmbedConfig& config,
     }
 
     /* Step 3: Embed the system table */
-    embed_system_table_bytes(config, result.patches, system_table_addr);
+    embed_system_table_bytes(config, result.patches, system_table_addr, loader_bin_addr);
 
     result.success = true;
     result.loader_start_addr = base_addr;

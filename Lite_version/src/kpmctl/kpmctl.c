@@ -20,21 +20,24 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-/* We redirect stdout to a pipe to capture dmesg output after triggering
- * the kernel hook. The execve call itself fails (ENOENT), but the kernel
- * side effect (KPM load/unload/list) happens during the syscall.
- */
+#ifndef AT_FDCWD
+#define AT_FDCWD -100
+#endif
+
+/* Trigger the KPM kernel hook via execveat(AT_FDCWD, ...).
+ * On modern aarch64 kernels the execve syscall may not reach
+ * do_execveat_common, so execveat is the reliable path.
+ * The call fails (ENOENT) but the KPM side effect happens first. */
 static int run_kpm_cmd(const char* cmd) {
-    /* Flush any pending output */
     fflush(stdout);
     fflush(stderr);
 
-    /* Trigger kernel hook — execve will fail but side effect happens */
+#ifdef __NR_execveat
+    syscall(__NR_execveat, -100 /* AT_FDCWD */, cmd, NULL, NULL, 0);
+#else
     syscall(__NR_execve, cmd, NULL, NULL);
+#endif
 
-    /* If execve returns, the hook was intercepted. This is expected.
-     * The KPM handler in the kernel returns from the hook, and execve
-     * will then try to actually execute the filename, which fails. */
     return 0;
 }
 
@@ -129,8 +132,11 @@ int main(int argc, char* argv[]) {
         /* Print dmesg lines containing SKRoot KPM */
         printf("--- dmesg output ---\n");
         fflush(stdout);
-        system("dmesg -c 2>/dev/null | grep 'SKRoot KPM' || "
-               "echo '(no output — kernel log may require root to read)'");
+        int rc = system("dmesg -c 2>/dev/null | grep 'SKRoot KPM' || "
+                        "echo '(no output — kernel log may require root to read)'");
+        if (rc == -1) {
+            perror("system");
+        }
 
     } else if (strcmp(subcmd, "status") == 0) {
         printf("Probing KPM runtime...\n");

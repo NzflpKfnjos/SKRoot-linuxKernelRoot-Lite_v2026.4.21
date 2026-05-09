@@ -70,7 +70,10 @@ size_t PatchFilldir64::patch_filldir64_core(const SymbolRegion& hook_func_start_
 	emit_ret_by_entry_insn(a, m_filldir64_orig_entry_insn);
 	a->bind(label_end);
 	a->mov(x0, x0);
-	aarch64_asm_b(a, (int32_t)(hook_jump_back_addr - (hook_func_start_addr + a->offset())));
+	if (!aarch64_asm_b_checked(a, (int64_t)hook_jump_back_addr - (int64_t)(hook_func_start_addr + a->offset()))) {
+		std::cout << "[发生错误] patch_filldir64 failed: jump-back out of range." << std::endl;
+		return 0;
+	}
 	std::cout << print_aarch64_asm(a) << std::endl;
 
 	std::vector<uint8_t> bytes = aarch64_asm_to_bytes(a);

@@ -58,6 +58,30 @@ def parse_sections(data):
 
     return sections
 
+def parse_symbols(data, sections):
+    symbols = {}
+    symtabs = [s for s in sections if s['type'] == 2 and s['entsize']]
+    for symtab in symtabs:
+        if symtab['link'] >= len(sections):
+            continue
+        strtab = sections[symtab['link']]
+        str_base = strtab['offset']
+        str_size = strtab['size']
+        count = symtab['size'] // symtab['entsize']
+        for i in range(count):
+            off = symtab['offset'] + i * symtab['entsize']
+            st_name = struct.unpack_from('<I', data, off)[0]
+            st_value = struct.unpack_from('<Q', data, off + 8)[0]
+            if st_name >= str_size:
+                continue
+            end = data.find(b'\0', str_base + st_name, str_base + str_size)
+            if end < 0:
+                continue
+            name = data[str_base + st_name:end].decode('ascii', errors='replace')
+            if name:
+                symbols[name] = st_value
+    return symbols
+
 def layout_sections(sections, data):
     """Layout ALLOC sections in order, return (combined_binary, layout_info)."""
     alloc_sections = [s for s in sections if s['flags'] & SHF_ALLOC and s['size'] > 0]
@@ -120,7 +144,9 @@ def main():
         data = f.read()
 
     sections = parse_sections(data)
+    symbols = parse_symbols(data, sections)
     combined, layout = layout_sections(sections, data)
+    entry_offset = symbols.get('kpm_main', 0)
 
     # Write binary
     bin_path = prefix + '.bin'
@@ -150,10 +176,12 @@ def main():
         f.write('};\n\n')
         f.write(f'#define KPM_LOADER_BIN_SIZE {len(combined)}\n')
         f.write(f'#define KPM_LOADER_TEXT_ADDR_OFFSET 0\n')
+        f.write(f'#define KPM_LOADER_ENTRY_OFFSET {entry_offset}\n')
         f.write('\n#endif\n')
 
     print(f"Extracted: {len(combined)} bytes → {bin_path}")
     print(f"Layout:    {h_path}")
+    print(f"Entry:     kpm_main @ {entry_offset:#x}")
     for entry in layout:
         print(f"  [{entry['name']:20s} off={entry['offset']:#06x} size={entry['size']:6d}]")
 

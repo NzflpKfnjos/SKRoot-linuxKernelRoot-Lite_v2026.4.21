@@ -13,9 +13,12 @@
 #define R_AARCH64_LD64_GOT_LO12_NC 312
 #define R_AARCH64_ADR_PREL_PG_HI21 275
 #define R_AARCH64_ADD_ABS_LO12_NC 277
-#define R_AARCH64_LDST128_ABS_LO12_NC 279
+#define R_AARCH64_LDST8_ABS_LO12_NC 278
 #define R_AARCH64_CONDBR19        280
 #define R_AARCH64_LDST64_ABS_LO12_NC 286
+#define R_AARCH64_LDST16_ABS_LO12_NC 284
+#define R_AARCH64_LDST32_ABS_LO12_NC 285
+#define R_AARCH64_LDST128_ABS_LO12_NC 299
 
 /* == Bit manipulation helpers == */
 static u32 rd32_le(const u8* p) {
@@ -43,12 +46,20 @@ static s64 sext(s64 val, int bits) {
 static int apply_reloc(u8* base, u64 base_addr,
                        const struct elf64_rela* rela,
                        u64 sym_val,
-                       const struct elf64_shdr* target_shdr __attribute__((unused))) {
+                       const struct elf64_shdr* target_shdr) {
     u32 r_type = ELF64_R_TYPE(rela->r_info);
     u64 P = base_addr + rela->r_offset;  /* relocation place address */
     u64 A = (u64)rela->r_addend;          /* addend */
     u64 S = sym_val;                      /* symbol value */
     u8* loc = base + rela->r_offset;
+    unsigned long write_size = 4;
+
+    if (r_type == R_AARCH64_NONE) write_size = 0;
+    else if (r_type == R_AARCH64_ABS64) write_size = 8;
+    if (target_shdr && write_size) {
+        if (rela->r_offset > target_shdr->sh_size) return -1000;
+        if (write_size > target_shdr->sh_size - rela->r_offset) return -1000;
+    }
 
     switch (r_type) {
     case R_AARCH64_NONE:
@@ -95,14 +106,51 @@ static int apply_reloc(u8* base, u64 base_addr,
         break;
     }
 
+    case R_AARCH64_LDST8_ABS_LO12_NC: {
+        u32 imm12 = (u32)((S + A) & 0xFFF);
+        u32 insn = rd32_le(loc);
+        insn &= ~(0xFFFu << 10);
+        insn |= imm12 << 10;
+        wr32_le(loc, insn);
+        break;
+    }
+
+    case R_AARCH64_LDST16_ABS_LO12_NC: {
+        u32 imm12 = (u32)((S + A) & 0xFFF);
+        u32 insn = rd32_le(loc);
+        if (imm12 & 1) return -1;
+        insn &= ~(0xFFFu << 10);
+        insn |= (imm12 >> 1) << 10;
+        wr32_le(loc, insn);
+        break;
+    }
+
+    case R_AARCH64_LDST32_ABS_LO12_NC: {
+        u32 imm12 = (u32)((S + A) & 0xFFF);
+        u32 insn = rd32_le(loc);
+        if (imm12 & 3) return -1;
+        insn &= ~(0xFFFu << 10);
+        insn |= (imm12 >> 2) << 10;
+        wr32_le(loc, insn);
+        break;
+    }
+
     case R_AARCH64_LDST64_ABS_LO12_NC: {
         u32 imm12 = (u32)((S + A) & 0xFFF);
         u32 insn = rd32_le(loc);
-        /* LDR/STR unsigned offset: imm12 scaled by 8 for 64-bit,
-         * but in UXTW form the immediate is in bits [21:10] unscaled.
-         * The encoding uses bits [21:10] as a 12-bit immediate. */
+        if (imm12 & 7) return -1;
         insn &= ~(0xFFFu << 10);
-        insn |= imm12 << 10;
+        insn |= (imm12 >> 3) << 10;
+        wr32_le(loc, insn);
+        break;
+    }
+
+    case R_AARCH64_LDST128_ABS_LO12_NC: {
+        u32 imm12 = (u32)((S + A) & 0xFFF);
+        u32 insn = rd32_le(loc);
+        if (imm12 & 15) return -1;
+        insn &= ~(0xFFFu << 10);
+        insn |= (imm12 >> 4) << 10;
         wr32_le(loc, insn);
         break;
     }
@@ -147,7 +195,7 @@ static int apply_reloc(u8* base, u64 base_addr,
          * sym_val (S) should be the GOT entry address.
          */
         u32 imm12 = (u32)((u64)S & 0xFFF);
-        /* LDR 64-bit: imm12 scaled by 8, so we divide by 8 */
+        if (imm12 & 7) return -1;
         u32 scaled_imm = imm12 >> 3;
         u32 insn = rd32_le(loc);
         insn &= ~(0xFFFu << 10);

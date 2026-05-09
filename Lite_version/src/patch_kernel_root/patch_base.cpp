@@ -31,7 +31,8 @@ uint32_t PatchBase::skip_pac_bti_at_func_start(uint32_t addr) {
 size_t PatchBase::patch_jump(size_t patch_addr, size_t jump_addr, std::vector<patch_bytes_data>& vec_out_patch_bytes_data) {
 	aarch64_asm_ctx asm_ctx = init_aarch64_asm();
 	auto a = asm_ctx.assembler();
-	aarch64_asm_b(a, (int32_t)(jump_addr - patch_addr));
+	int64_t diff = (int64_t)jump_addr - (int64_t)patch_addr;
+	if (!aarch64_asm_b_checked(a, diff)) return 0;
 	std::vector<uint8_t> bytes = aarch64_asm_to_bytes(a);
 	if (bytes.size() == 0) return 0;
 	std::string str_bytes = bytes2hex((const unsigned char*)bytes.data(), bytes.size());
@@ -102,11 +103,21 @@ void PatchBase::emit_get_current(Assembler* a, GpX x) {
 	a->ldr(x, ptr(x, offsetof(thread_info, task)));
 }
 
-void PatchBase::emit_safe_bl(Assembler* a, size_t func_base_addr, size_t target) {
+bool PatchBase::emit_safe_bl(Assembler* a, size_t func_base_addr, size_t target) {
+	if (!a) return false;
 	RegProtectGuard g1(a, x29, x30);
 	size_t bl_addr = func_base_addr + a->offset();
 	int64_t diff = (int64_t)target - (int64_t)bl_addr;
-	aarch64_asm_bl_raw(a, (int32_t)diff);
+	if ((diff & 3) != 0) {
+		std::cout << "[发生错误] safe BL offset must be a multiple of 4" << std::endl;
+		return false;
+	}
+	int64_t imm26 = diff >> 2;
+	if (imm26 < -(1LL << 25) || imm26 >= (1LL << 25)) {
+		std::cout << "[发生错误] safe BL offset exceeds ±128MB range" << std::endl;
+		return false;
+	}
+	return aarch64_asm_bl_raw(a, static_cast<int32_t>(diff));
 }
 
 void PatchBase::emit_ret_by_entry_insn(Assembler* a, uint32_t entry_insn) {

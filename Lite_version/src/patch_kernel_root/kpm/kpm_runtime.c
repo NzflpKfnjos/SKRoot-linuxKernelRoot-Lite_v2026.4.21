@@ -1,6 +1,12 @@
 #include "kpm_libc.h"
 #include "kpm_runtime.h"
 
+void kpm_main(struct kpm_system_table* sys, int command,
+              const void* arg, unsigned long arg_size);
+void* kpm_add_slide_ptr(void* ptr, long slide);
+extern char __kpm_loader_start[];
+extern char __kpm_loader_end[];
+
 /* == Minimal libc subset (freestanding, no builtins) == */
 
 void* kpm_memcpy(void* dest, const void* src, unsigned long n) {
@@ -8,6 +14,12 @@ void* kpm_memcpy(void* dest, const void* src, unsigned long n) {
     const unsigned char* s = (const unsigned char*)src;
     for (unsigned long i = 0; i < n; ++i) d[i] = s[i];
     return dest;
+}
+
+/* Compiler may generate calls to standard memcpy for struct assignments */
+__attribute__((used, visibility("default")))
+void* memcpy(void* dest, const void* src, unsigned long n) {
+    return kpm_memcpy(dest, src, n);
 }
 
 void* kpm_memset(void* s, int c, unsigned long n) {
@@ -79,17 +91,63 @@ static u64 hex_to_u64_local(const char* s, int max_digits) {
     return v;
 }
 
-/* == Global runtime state == */
-static struct kpm_runtime_state g_rt_state;
-static struct hook_entry* g_hook_list = 0;
+/* == Runtime state ==
+ * This loader is embedded in kernel text, so its own .bss is read-only at
+ * runtime. Do not persist mutable state here.
+ */
+static struct hook_entry* const g_hook_list = 0;
 
-void kpm_runtime_init(struct kpm_system_table* sys, struct kpm_runtime_api* api) {
-    g_rt_state.sys = sys;
-    g_rt_state.api = api;
-    g_hook_list = 0;
+static int kpm_runtime_get_sys(struct kpm_system_table* out) {
+    unsigned long actual_entry = (unsigned long)&kpm_main;
+    unsigned long actual_loader_end =
+        ((unsigned long)__kpm_loader_end + 7UL) & ~7UL;
+    struct kpm_system_table* raw =
+        (struct kpm_system_table*)actual_loader_end;
+
+    if (!out || !raw || !raw->loader_base || !raw->loader_entry_offset) return 0;
+    kpm_memcpy(out, raw, sizeof(*out));
+
+    unsigned long table_entry = (unsigned long)raw->loader_base +
+                                raw->loader_entry_offset;
+    long slide = (long)(actual_entry - table_entry);
+    if (slide == 0) return 1;
+
+    out->kallsyms_lookup_name =
+        (void* (*)(const char*))kpm_add_slide_ptr((void*)out->kallsyms_lookup_name, slide);
+    out->kmalloc =
+        (void* (*)(unsigned long, unsigned int))kpm_add_slide_ptr((void*)out->kmalloc, slide);
+    out->kfree =
+        (void (*)(const void*))kpm_add_slide_ptr((void*)out->kfree, slide);
+    out->vmalloc =
+        (void* (*)(unsigned long))kpm_add_slide_ptr((void*)out->vmalloc, slide);
+    out->vfree =
+        (void (*)(const void*))kpm_add_slide_ptr((void*)out->vfree, slide);
+    out->memset_impl =
+        (void* (*)(void*, int, unsigned long))kpm_add_slide_ptr((void*)out->memset_impl, slide);
+    out->memcpy_impl =
+        (void* (*)(void*, const void*, unsigned long))kpm_add_slide_ptr((void*)out->memcpy_impl, slide);
+    out->printk =
+        (int (*)(const char*, ...))kpm_add_slide_ptr((void*)out->printk, slide);
+    out->syscall_table = kpm_add_slide_ptr(out->syscall_table, slide);
+    out->init_task = kpm_add_slide_ptr(out->init_task, slide);
+    out->filp_open_fn =
+        (void* (*)(const char*, int, unsigned short))kpm_add_slide_ptr((void*)out->filp_open_fn, slide);
+    out->kernel_read_fn =
+        (long (*)(void*, void*, unsigned long, unsigned long long*))kpm_add_slide_ptr((void*)out->kernel_read_fn, slide);
+    out->filp_close_fn =
+        (int (*)(void*, void*))kpm_add_slide_ptr((void*)out->filp_close_fn, slide);
+    out->copy_from_user_fn =
+        (unsigned long (*)(void*, const void*, unsigned long))kpm_add_slide_ptr((void*)out->copy_from_user_fn, slide);
+    out->loader_base = kpm_add_slide_ptr(out->loader_base, slide);
+    return 1;
 }
 
-struct kpm_runtime_state* kpm_runtime_get_state(void) { return &g_rt_state; }
+void kpm_runtime_init(struct kpm_system_table* sys, struct kpm_runtime_api* api) {
+    (void)sys;
+    (void)api;
+}
+
+struct kpm_runtime_state* kpm_runtime_get_state(void) { return 0; }
 struct hook_entry* kpm_runtime_get_hooks(void) { return g_hook_list; }
 
 /* == I-cache maintenance helpers == */
@@ -134,12 +192,58 @@ void kpm_cache_flush_range(const void* start, unsigned long size) {
     );
 }
 
+static int a64_branch26(void* from, void* to, u32* out) {
+    s64 delta;
+    s64 imm26;
+
+    if (!from || !to || !out) return 0;
+    delta = (s64)((u64)to - (u64)from);
+    if ((delta & 3) != 0) return 0;
+    imm26 = delta >> 2;
+    if (imm26 < -(1LL << 25) || imm26 >= (1LL << 25)) return 0;
+    *out = 0x14000000u | ((u32)imm26 & 0x03FFFFFFu);
+    return 1;
+}
+
+static int a64_is_pc_relative(u32 insn) {
+    if ((insn & 0x9F000000u) == 0x10000000u) return 1;
+    if ((insn & 0x9F000000u) == 0x90000000u) return 1;
+    if ((insn & 0x3B000000u) == 0x18000000u) return 1;
+    if ((insn & 0xFC000000u) == 0x14000000u) return 1;
+    if ((insn & 0xFC000000u) == 0x94000000u) return 1;
+    if ((insn & 0xFF000010u) == 0x54000000u) return 1;
+    if ((insn & 0x7E000000u) == 0x34000000u) return 1;
+    if ((insn & 0x7E000000u) == 0x36000000u) return 1;
+    return 0;
+}
+
+static int emit_u32(u8* code, int* idx, u32 insn) {
+    if (!code || !idx || *idx < 0 || *idx > 0x1000 - 4) return 0;
+    *(volatile u32*)(code + *idx) = insn;
+    *idx += 4;
+    return 1;
+}
+
+static int emit_mov_abs_x16(u8* code, int* idx, u64 addr) {
+    if (!emit_u32(code, idx, 0xD2800000u | (u32)(((addr >> 0) & 0xFFFFu) << 5) | 16u)) return 0;
+    if (!emit_u32(code, idx, 0xF2800000u | (1u << 21) | (u32)(((addr >> 16) & 0xFFFFu) << 5) | 16u)) return 0;
+    if (!emit_u32(code, idx, 0xF2800000u | (2u << 21) | (u32)(((addr >> 32) & 0xFFFFu) << 5) | 16u)) return 0;
+    if (!emit_u32(code, idx, 0xF2800000u | (3u << 21) | (u32)(((addr >> 48) & 0xFFFFu) << 5) | 16u)) return 0;
+    return 1;
+}
+
+static int emit_call_abs_x16(u8* code, int* idx, void* fn) {
+    if (!fn) return 1;
+    if (!emit_mov_abs_x16(code, idx, (u64)(unsigned long)fn)) return 0;
+    return emit_u32(code, idx, 0xD63F0200u);
+}
+
 /* == Runtime API implementations == */
 
 void* rt_kallsyms_lookup_name(const char* name) {
-    struct kpm_runtime_state* st = &g_rt_state;
-    if (!st->sys || !st->sys->kallsyms_lookup_name) return 0;
-    return st->sys->kallsyms_lookup_name(name);
+    struct kpm_system_table sys;
+    if (!kpm_runtime_get_sys(&sys) || !sys.kallsyms_lookup_name) return 0;
+    return sys.kallsyms_lookup_name(name);
 }
 
 /* hook_wrap(target, handler, trampoline_buf)
@@ -149,199 +253,34 @@ void* rt_kallsyms_lookup_name(const char* name) {
  * Returns trampoline address or 0 on failure.
  */
 void* rt_hook_wrap(void* target, void* handler, void* trampoline_buf) {
-    struct kpm_runtime_state* st = &g_rt_state;
-    if (!target || !handler || !trampoline_buf) return 0;
-
-    u8* tgt = (u8*)target;
-    u8* tramp = (u8*)trampoline_buf;
-
-    /* Read the first 2 instructions (8 bytes) from target */
-    u32 insn0 = *(volatile u32*)(tgt);
-    u32 insn1 = *(volatile u32*)(tgt + 4);
-
-    /* Build trampoline: original instructions + branch back */
-    *(volatile u32*)(tramp) = insn0;
-    *(volatile u32*)(tramp + 4) = insn1;
-
-    /* B <target + 8> from trampoline + 8 */
-    s64 delta_tramp = (s64)((u64)(tgt + 8) - (u64)(tramp + 8));
-    u32 branch_back = 0x14000000u | (u32)((delta_tramp >> 2) & 0x03FFFFFFu);
-    *(volatile u32*)(tramp + 8) = branch_back;
-
-    /* Flush trampoline dcache + icache */
-    kpm_cache_flush_range(tramp, 12);
-
-    /* Write B <handler> at target */
-    s64 delta_hook = (s64)((u64)handler - (u64)target);
-    u32 branch_hook = 0x14000000u | (u32)((delta_hook >> 2) & 0x03FFFFFFu);
-    *(volatile u32*)(tgt) = branch_hook;
-    kpm_cache_flush_range(tgt, 4);
-
-    /* Track this hook */
-    struct hook_entry* entry = (struct hook_entry*)
-        st->sys->kmalloc(sizeof(struct hook_entry), 0xCC0);
-    if (entry) {
-        entry->target = target;
-        entry->trampoline = trampoline_buf;
-        entry->orig_insns[0] = insn0;
-        entry->orig_insns[1] = insn1;
-        entry->orig_insn_count = 2;
-        entry->is_syscall_wrap = 0;
-        entry->syscall_nr = 0;
-        entry->syscall_original = 0;
-        entry->next = g_hook_list;
-        g_hook_list = entry;
-    }
-
-    return trampoline_buf;
+    (void)target;
+    (void)handler;
+    (void)trampoline_buf;
+    return 0;
 }
 
 void rt_hook_unwrap_remove(void* target) {
-    struct hook_entry** prev = &g_hook_list;
-    struct hook_entry* entry = g_hook_list;
-    struct kpm_runtime_state* st = &g_rt_state;
-
-    while (entry) {
-        if (entry->target == target) {
-            /* Restore original instructions */
-            u8* tgt = (u8*)target;
-            if (entry->is_syscall_wrap) {
-                /* Restore syscall table entry */
-                u64* sct = (u64*)st->sys->syscall_table;
-                sct[entry->syscall_nr] = (u64)entry->syscall_original;
-                kpm_cache_flush_range(&sct[entry->syscall_nr], 8);
-            } else {
-                /* Restore inline hook */
-                for (int i = 0; i < entry->orig_insn_count; ++i) {
-                    *(volatile u32*)(tgt + i * 4) = entry->orig_insns[i];
-                }
-                kpm_cache_flush_range(tgt, (unsigned long)entry->orig_insn_count * 4);
-            }
-
-            /* Free trampoline */
-            if (entry->trampoline) st->sys->kfree(entry->trampoline);
-
-            /* Unlink and free entry */
-            *prev = entry->next;
-            st->sys->kfree(entry);
-            return;
-        }
-        prev = &entry->next;
-        entry = entry->next;
-    }
+    (void)target;
 }
 
 /* fp_wrap_syscalln(nr, before, after)
  * Wraps syscall_table[nr] to call before() -> original() -> after()
  */
 void* rt_fp_wrap_syscalln(int nr, void* before, void* after) {
-    struct kpm_runtime_state* st = &g_rt_state;
-    if (!st->sys || !st->sys->syscall_table) return 0;
-
-    u64* sct = (u64*)st->sys->syscall_table;
-    void* original = (void*)(u64)sct[nr];
-    if (!original) return 0;
-
-    /* Allocate trampoline page */
-    u8* tramp = (u8*)st->sys->kmalloc(0x1000, 0xCC0);
-    if (!tramp) return 0;
-
-    /* Build wrapper asm:
-     *   stp x29, x30, [sp, #-16]!
-     *   mov x29, sp
-     *   blr <before>        (if not null)
-     *   blr <original>
-     *   mov <scratch>, x0
-     *   blr <after>         (if not null)
-     *   mov x0, <scratch>
-     *   ldp x29, x30, [sp], #16
-     *   ret
-     */
-    int idx = 0;
-    /* stp x29, x30, [sp, #-16]!   = 0xA9BF7BFD */
-    *(volatile u32*)(tramp + idx) = 0xA9BF7BFD; idx += 4;
-    /* mov x29, sp                   = 0x910003FD */
-    *(volatile u32*)(tramp + idx) = 0x910003FD; idx += 4;
-
-    if (before) {
-        /* blr x16 */  /* save x0 first */
-        s64 d0 = (s64)((u64)before - (u64)(tramp + idx));
-        u32 bl0 = 0x94000000u | (u32)((d0 >> 2) & 0x03FFFFFFu);
-        *(volatile u32*)(tramp + idx) = bl0; idx += 4;
-    }
-
-    {
-        /* blr <original> */
-        s64 d1 = (s64)((u64)original - (u64)(tramp + idx));
-        u32 bl1 = 0x94000000u | (u32)((d1 >> 2) & 0x03FFFFFFu);
-        *(volatile u32*)(tramp + idx) = bl1; idx += 4;
-    }
-
-    /* mov x19, x0 (save return value) */
-    *(volatile u32*)(tramp + idx) = 0xAA0003F3; idx += 4;
-
-    if (after) {
-        s64 d2 = (s64)((u64)after - (u64)(tramp + idx));
-        u32 bl2 = 0x94000000u | (u32)((d2 >> 2) & 0x03FFFFFFu);
-        *(volatile u32*)(tramp + idx) = bl2; idx += 4;
-    }
-
-    /* mov x0, x19 (restore return value) */
-    *(volatile u32*)(tramp + idx) = 0xAA1303E0; idx += 4;
-    /* ldp x29, x30, [sp], #16    = 0xA8C17BFD */
-    *(volatile u32*)(tramp + idx) = 0xA8C17BFD; idx += 4;
-    /* ret                         = 0xD65F03C0 */
-    *(volatile u32*)(tramp + idx) = 0xD65F03C0; idx += 4;
-
-    kpm_cache_flush_range(tramp, (unsigned long)idx);
-
-    /* Replace syscall table entry */
-    sct[nr] = (u64)tramp;
-    kpm_cache_flush_range(&sct[nr], 8);
-
-    /* Track hook */
-    struct hook_entry* entry = (struct hook_entry*)
-        st->sys->kmalloc(sizeof(struct hook_entry), 0xCC0);
-    if (entry) {
-        entry->target = (void*)(u64)(&sct[nr]);
-        entry->trampoline = tramp;
-        entry->orig_insn_count = 0;
-        entry->is_syscall_wrap = 1;
-        entry->syscall_nr = nr;
-        entry->syscall_original = original;
-        entry->next = g_hook_list;
-        g_hook_list = entry;
-    }
-
-    return tramp;
+    (void)nr;
+    (void)before;
+    (void)after;
+    return 0;
 }
 
 void rt_fp_unwrap_syscalln(int nr) {
-    struct kpm_runtime_state* st = &g_rt_state;
-    if (!st->sys || !st->sys->syscall_table) return;
-
-    /* Find hook entry by syscall nr */
-    struct hook_entry** prev = &g_hook_list;
-    struct hook_entry* entry = g_hook_list;
-    while (entry) {
-        if (entry->is_syscall_wrap && entry->syscall_nr == nr) {
-            u64* sct = (u64*)st->sys->syscall_table;
-            sct[nr] = (u64)entry->syscall_original;
-            kpm_cache_flush_range(&sct[nr], 8);
-            if (entry->trampoline) st->sys->kfree(entry->trampoline);
-            *prev = entry->next;
-            st->sys->kfree(entry);
-            return;
-        }
-        prev = &entry->next;
-        entry = entry->next;
-    }
+    (void)nr;
 }
 
 void* rt_kf_memset(void* s, int c, unsigned long n) {
-    struct kpm_runtime_state* st = &g_rt_state;
-    if (st->sys && st->sys->memset_impl)
-        return st->sys->memset_impl(s, c, n);
+    struct kpm_system_table sys;
+    if (kpm_runtime_get_sys(&sys) && sys.memset_impl)
+        return sys.memset_impl(s, c, n);
     return kpm_memset(s, c, n);
 }
 

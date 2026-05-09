@@ -52,10 +52,12 @@ struct kpm_system_table {
     void* (*filp_open_fn)(const char* path, int flags, unsigned short mode);
     long  (*kernel_read_fn)(void* file, void* buf, unsigned long count, unsigned long long* pos);
     int   (*filp_close_fn)(void* file, void* owner);
+    unsigned long (*copy_from_user_fn)(void* to, const void* from, unsigned long n);
 
     /* KPM loader binary base (for self-referencing) */
     void* loader_base;
     unsigned long loader_size;
+    unsigned long loader_entry_offset;
 };
 
 /* KPM loader entry point, called by asmjit wrapper shellcode.

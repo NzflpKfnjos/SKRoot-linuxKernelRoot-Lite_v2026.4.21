@@ -1,0 +1,202 @@
+本工具用于生成SKRoot(Lite) ARM64 Linux内核ROOT提权代码 V12
+
+/mnt/c/Users/778/Desktop/skroot/SKRoot-linuxKernelRoot-Lite_v2026.4.21/boot_build_import_fix_v2/kernel
+
+Find the current Linux kernel version: 6.6.30
+
+code_static_start: 0x10000
+fisrt kallsyms_offset_start: 0x144d5b0
+fisrt kallsyms_offset_end: 0x14b51a8
+kallsyms_relative_base: 0xffffffc080000000, offset: 0x14b51a8
+kallsyms_num: 0x19efe, offset: 0x12e4120
+kallsyms_offset_start: 0x144d5b0
+kallsyms_offset_end: 0x14b51a8
+kallsyms_names_start: 0x12e4128
+kallsyms_names_end: 0x144c9a3
+kallsyms_markers_start: 0x144c9a8
+kallsyms_markers_end: 0x144d024
+kallsyms_token_table_start: 0x144d028
+kallsyms_token_table_end: 0x144d3aa
+kallsyms_token_index_start: 0x144d3b0
+kallsyms_seqs_of_names_list_start: 0x14b51b0
+kallsyms_seqs_of_names_list_end: 0x1502eaa
+_text:0
+_stext:10000
+_etext:1050000
+die:23d10, size:308
+__drm_puts_coredump:8c5ce4, size:f8
+__drm_printfn_coredump:8c5db4, size:f8
+__do_execve_file:0, size:0
+do_execveat_common:3b3968, size:2c4
+do_execve_common:0, size:0
+do_execveat:0, size:0
+do_execve:0, size:0
+avc_denied:606970, size:7c
+audit_log_start:1b9660
+filldir64:3c466c
+sys_getuid:cb704, size:20
+prctl_get_seccomp:1cdc7c, size:c
+__cfi_check:0, size:0
+__cfi_check_fail:0
+__cfi_slowpath_diag:0
+__cfi_slowpath:0
+__ubsan_handle_cfi_check_fail_abort:0
+__ubsan_handle_cfi_check_fail:0
+report_cfi_failure:29c5b0
+cred uid offset:8
+cred offset:820
+seccomp offset:8e8
+Find the current Linux kernel version: 6.6.30
+
+code_static_start: 0x10000
+fisrt kallsyms_offset_start: 0x144d5b0
+fisrt kallsyms_offset_end: 0x14b51a8
+kallsyms_relative_base: 0xffffffc080000000, offset: 0x14b51a8
+kallsyms_num: 0x19efe, offset: 0x12e4120
+kallsyms_offset_start: 0x144d5b0
+kallsyms_offset_end: 0x14b51a8
+kallsyms_names_start: 0x12e4128
+kallsyms_names_end: 0x144c9a3
+kallsyms_markers_start: 0x144c9a8
+kallsyms_markers_end: 0x144d024
+kallsyms_token_table_start: 0x144d028
+kallsyms_token_table_end: 0x144d3aa
+kallsyms_token_index_start: 0x144d3b0
+kallsyms_seqs_of_names_list_start: 0x14b51b0
+kallsyms_seqs_of_names_list_end: 0x1502eaa
+
+=== KPM Loader Integration ===
+KPM code cave: 0x1042120, size:0xdee0
+init_cred offset:206ed28
+kernel VA base: 0xffffffc080000000
+KPM loader embedding:
+  handler:     0x1042120
+  loader:      0x1043000 (14800 bytes)
+  entry:       0x1043890 (offset 0x890)
+  system tbl:  0x10469d0 (216 bytes)
+KPM handler: 0x1042120
+init_cred offset:206ed28
+Start hooking addr:  23d10
+
+.BYTE 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00, 0X00
+MOV X0, X0
+MOV X11, -4095
+CMP X1, X11
+B.HS L0
+LDR X11, [X1]
+.BYTE 0XEC, 0XFD, 0XFF, 0X10
+L1:
+LDRB W14, [X11], 1
+LDRB W15, [X12], 1
+CMP W14, W15
+B.NE L0
+CBNZ W15, L1
+MRS X12, 49672
+LDR X14, [X12, 2080]
+ADD X14, X14, 8
+STR XZR, [X14], 8
+STR XZR, [X14], 8
+STR XZR, [X14], 8
+STR XZR, [X14], 8
+STR WZR, [X14], 8
+MOV X13, 2199023255551
+STP X13, X13, [X14], 16
+STP X13, X13, [X14], 16
+STR X13, [X14], 8
+MOV X15, 2048
+LDAXR X14, [X12]
+BIC X14, X14, X15
+STLXR X15, X14, [X12]
+STR WZR, [X12, 2280]
+L0:
+LDR X11, [X1]
+CBZ X11, L2
+MOV X15, -4095
+CMP X11, X15
+B.HS L2
+LDRB W15, [X11]
+CMP W15, 64
+B.NE L2
+STP X29, X30, [SP, -16]!
+.BYTE 0XD3, 0X78, 0X40, 0X94
+LDP X29, X30, [SP], 16
+L2:
+.BYTE 0XE5, 0X3E, 0X0E, 0X14
+
+Start hooking addr:  23de0
+
+.BYTE 0X8B, 0XF9, 0XFF, 0X10
+
+Start hooking addr:  8c5cec
+
+CMP W2, 16
+B.NE L0
+MOV X12, 0
+L1:
+LDRB W13, [X1, X12]
+LDRB W14, [X11, X12]
+CMP W13, W14
+B.NE L0
+ADD X12, X12, 1
+CMP X12, 16
+B.LT L1
+MOV X0, 1
+.BYTE 0XFF, 0X0B, 0X5F, 0XD6
+L0:
+MOV X0, X0
+.BYTE 0X55, 0XFA, 0XEB, 0X17
+
+Start hooking addr:  8c5dbc
+
+MOV X10, XZR
+MRS X11, 49672
+LDR X11, [X11, 2080]
+LDR W12, [X11, 24]
+CBNZ W12, L0
+ADD X11, X11, 40
+LDR W13, [X11], 8
+CBNZ W13, L0
+MOV X12, 2199023255551
+MOV X13, 5
+L2:
+LDR X14, [X11], 8
+CMP X14, X12
+B.LO L0
+SUBS X13, X13, 1
+B.NE L2
+L1:
+MOV X10, 1
+L0:
+RET X30
+
+Start hooking addr:  8c5e00
+
+STP X29, X30, [SP, -16]!
+.BYTE 0XEE, 0XFF, 0XFF, 0X97
+LDP X29, X30, [SP], 16
+CBZ X10, L0
+MOV W0, WZR
+L0:
+RET X30
+
+Start hooking addr:  8c5e18
+
+STP X29, X30, [SP, -16]!
+.BYTE 0XE8, 0XFF, 0XFF, 0X97
+LDP X29, X30, [SP], 16
+CBZ X10, L0
+MOV W0, WZR
+.BYTE 0XFF, 0X0B, 0X5F, 0XD6
+L0:
+MOV X0, X0
+.BYTE 0X0D, 0XCE, 0XE3, 0X17
+
+
+请选择是否需要自动随机生成ROOT密匙（1需要；2不需要）：
+请输入ROOT密匙（48个字符的字符串，包含大小写和数字）：
+
+#获取ROOT权限的密匙(Key): MoFS20amQM1zKk0pa7ZHuBm4rMaiapAlVWoxVCwdSSD4PlkX
+
+#是否需要立即写入修改到文件？（1需要；2不需要）：
+#正在写入，请稍后...
+Done.

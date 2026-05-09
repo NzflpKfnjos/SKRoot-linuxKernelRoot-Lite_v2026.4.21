@@ -27,7 +27,10 @@ size_t PatchAvcDenied::patch_avc_denied(const SymbolRegion& hook_func_start_regi
 	auto a = asm_ctx.assembler();
 
 	Label label_end = a->newLabel();
-	emit_safe_bl(a, hook_func_start_addr, current_avc_check_bl_func);
+	if (!emit_safe_bl(a, hook_func_start_addr, current_avc_check_bl_func)) {
+		std::cout << "[发生错误] patch_avc_denied failed: safe BL out of range." << std::endl;
+		return 0;
+	}
 	a->cbz(x10, label_end);
 	a->mov(w0, wzr);
 	a->bind(label_end);

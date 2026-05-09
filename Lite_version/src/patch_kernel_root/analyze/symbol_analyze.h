@@ -17,6 +17,7 @@ struct SymbolRegion {
 struct KernelSymbolOffset {
 	size_t _text = 0;
 	size_t _stext = 0;
+	size_t _etext = 0;
 	SymbolRegion die = { 0 };
 	SymbolRegion __drm_puts_coredump = { 0 };
 	SymbolRegion __drm_printfn_coredump = { 0 };

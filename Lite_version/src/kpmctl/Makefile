@@ -21,6 +21,9 @@ ifdef NDK
   ifeq ($(wildcard $(NDK_TC)),)
     NDK_TC := $(NDK)/toolchains/llvm/prebuilt/linux-x86_64
   endif
+  ifeq ($(wildcard $(NDK_TC)),)
+    NDK_TC := $(NDK)/toolchains/llvm/prebuilt/windows-x86_64
+  endif
   CC := $(NDK_TC)/bin/aarch64-linux-android21-clang
 else ifdef CROSS
   CC := $(CROSS)gcc

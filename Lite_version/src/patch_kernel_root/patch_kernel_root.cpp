@@ -12,6 +12,10 @@
 #include "3rdparty/find_imm_register_offset.h"
 #include "3rdparty/find_adrp_target.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+
 struct PatchKernelOffset {
 	size_t cred_offset = 0;
 	size_t cred_uid_offset = 0;
@@ -23,6 +27,26 @@ struct PatchKernelResult {
 	bool patched = false;
 	size_t root_key_start = 0;
 };
+
+static void wait_before_exit() {
+#ifdef _WIN32
+	system("pause");
+#endif
+}
+
+static size_t find_kernel_version_string_offset(const std::vector<char>& file_buf) {
+	const char* prefix = "Linux version ";
+	const size_t prefix_len = std::strlen(prefix);
+	if (file_buf.size() < prefix_len) return 0;
+
+	for (size_t i = 0; i + prefix_len < file_buf.size(); ++i) {
+		if (std::memcmp(file_buf.data() + i, prefix, prefix_len) == 0 &&
+			std::isdigit((unsigned char)file_buf[i + prefix_len])) {
+			return i + prefix_len;
+		}
+	}
+	return 0;
+}
 
 bool check_file_path(const char* file_path) {
 	return std::filesystem::path(file_path).extension() != ".img";
@@ -76,6 +100,94 @@ bool parser_huawei_kti_addr(const std::vector<char>& file_buf, const SymbolRegio
 	if (symbol.size == 0) return false;
 	if (!find_adrp_target(file_buf, symbol.offset, symbol.offset + symbol.size, kti_addr)) return false;
 	return kti_addr > 0;
+}
+
+static size_t align_up(size_t value, size_t align) {
+	return (value + align - 1) & ~(align - 1);
+}
+
+struct ReservedRange {
+	size_t begin = 0;
+	size_t end = 0;
+};
+
+static void add_reserved_range(std::vector<ReservedRange>& ranges, size_t begin, size_t size) {
+	if (!begin || !size) return;
+	ranges.push_back({ begin, begin + size });
+}
+
+static void add_reserved_region(std::vector<ReservedRange>& ranges, const SymbolRegion& region) {
+	add_reserved_range(ranges, static_cast<size_t>(region.offset), static_cast<size_t>(region.size));
+}
+
+static std::vector<ReservedRange> build_kpm_reserved_ranges(const KernelSymbolOffset& sym) {
+	std::vector<ReservedRange> ranges;
+	add_reserved_range(ranges, 0x200, 0x300);
+	add_reserved_region(ranges, sym.die);
+	add_reserved_region(ranges, sym.__drm_puts_coredump);
+	add_reserved_region(ranges, sym.__drm_printfn_coredump);
+	add_reserved_region(ranges, sym.__cfi_check);
+	add_reserved_region(ranges, sym.__do_execve_file);
+	add_reserved_region(ranges, sym.do_execveat_common);
+	add_reserved_region(ranges, sym.do_execve_common);
+	add_reserved_region(ranges, sym.do_execveat);
+	add_reserved_region(ranges, sym.do_execve);
+	add_reserved_region(ranges, sym.avc_denied);
+	add_reserved_range(ranges, sym.audit_log_start, 4);
+	add_reserved_range(ranges, sym.filldir64, 4);
+	add_reserved_range(ranges, sym.__cfi_check_fail, 4);
+	add_reserved_range(ranges, sym.__cfi_slowpath_diag, 4);
+	add_reserved_range(ranges, sym.__cfi_slowpath, 4);
+	add_reserved_range(ranges, sym.__ubsan_handle_cfi_check_fail_abort, 4);
+	add_reserved_range(ranges, sym.__ubsan_handle_cfi_check_fail, 4);
+	add_reserved_range(ranges, sym.report_cfi_failure, 4);
+	add_reserved_range(ranges, sym.hkip_check_uid_root, 4);
+	add_reserved_range(ranges, sym.hkip_check_gid_root, 4);
+	add_reserved_range(ranges, sym.hkip_check_xid_root, 4);
+	return ranges;
+}
+
+static void consider_zero_cave_segment(size_t segment_start, size_t segment_end, size_t min_size, SymbolRegion& best) {
+	size_t aligned_start = align_up(segment_start, 16);
+	if (aligned_start >= segment_end) return;
+	size_t aligned_size = segment_end - aligned_start;
+	if (aligned_size >= min_size && aligned_size > best.size) {
+		best = { aligned_start, aligned_size };
+	}
+}
+
+static SymbolRegion find_zero_code_cave(const std::vector<char>& file_buf, size_t begin, size_t end, size_t min_size,
+	const std::vector<ReservedRange>& reserved_ranges = {}) {
+	SymbolRegion best = { 0, 0 };
+	if (begin >= file_buf.size()) return best;
+	end = std::min(end, file_buf.size());
+	if (begin >= end) return best;
+
+	std::vector<ReservedRange> ranges = reserved_ranges;
+	std::sort(ranges.begin(), ranges.end(), [](const ReservedRange& a, const ReservedRange& b) {
+		return a.begin < b.begin;
+	});
+
+	size_t i = begin;
+	while (i < end) {
+		while (i < end && file_buf[i] != 0) ++i;
+		size_t run_start = i;
+		while (i < end && file_buf[i] == 0) ++i;
+		size_t run_end = i;
+		size_t segment_start = run_start;
+
+		for (const auto& range : ranges) {
+			if (range.end <= segment_start) continue;
+			if (range.begin >= run_end) break;
+			if (range.begin > segment_start) {
+				consider_zero_cave_segment(segment_start, std::min(range.begin, run_end), min_size, best);
+			}
+			segment_start = std::max(segment_start, range.end);
+			if (segment_start >= run_end) break;
+		}
+		consider_zero_cave_segment(segment_start, run_end, min_size, best);
+	}
+	return best;
 }
 
 void cfi_bypass(const std::vector<char>& file_buf, KernelSymbolOffset &sym, std::vector<patch_bytes_data>& vec_patch_bytes_data) {
@@ -160,7 +272,7 @@ int main(int argc, char* argv[]) {
 #else
 	if (argc < 1) {
 		std::cout << "无输入文件" << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 #endif
@@ -201,21 +313,21 @@ int main(int argc, char* argv[]) {
 	if (!check_file_path(file_path)) {
 		std::cout << "Please enter the correct Linux kernel binary file path. " << std::endl;
 		std::cout << "For example, if it is boot.img, you need to first decompress boot.img and then extract the kernel file inside." << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 
 	std::vector<char> file_buf = read_file_buf(file_path);
 	if (!file_buf.size()) {
 		std::cout << "Fail to open file:" << file_path << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 
 	SymbolAnalyze symbol_analyze(file_buf);
 	if (!symbol_analyze.analyze_kernel_symbol()) {
 		std::cout << "Failed to analyze kernel symbols" << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 	KernelSymbolOffset sym = symbol_analyze.get_symbol_offset();
@@ -224,20 +336,20 @@ int main(int argc, char* argv[]) {
 	PatchKernelOffset off;
 	if (!parser_cred_offset(file_buf, sym.sys_getuid, off.cred_offset)) {
 		std::cout << "Failed to parse cred offset" << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 
 	if (!parse_cred_uid_offset(file_buf, sym.sys_getuid, off.cred_offset, off.cred_uid_offset)) {
 		std::cout << "Failed to parse cred uid offset" << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 	std::cout << "cred uid offset:" << off.cred_uid_offset << std::endl;
 
 	if (!parser_seccomp_offset(file_buf, sym.prctl_get_seccomp, off.seccomp_offset)) {
 		std::cout << "Failed to parse seccomp offset" << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 	std::cout << "cred offset:" << off.cred_offset << std::endl;
@@ -268,22 +380,26 @@ int main(int argc, char* argv[]) {
 			uint64_t _ms_addr = sym_parser.kallsyms_lookup_name("memset");
 			uint64_t _mc_addr = sym_parser.kallsyms_lookup_name("memcpy");
 			uint64_t _sct_addr = sym_parser.kallsyms_lookup_name("sys_call_table");
+			uint64_t _kln_addr = sym_parser.kallsyms_lookup_name("kallsyms_lookup_name");
 			uint64_t _it_addr = sym_parser.kallsyms_lookup_name("init_task");
 			uint64_t _fo_addr = sym_parser.kallsyms_lookup_name("filp_open");
 			uint64_t _kr_addr = sym_parser.kallsyms_lookup_name("kernel_read");
 			if (!_kr_addr) _kr_addr = sym_parser.kallsyms_lookup_name("__kernel_read");
 			uint64_t _fc_addr = sym_parser.kallsyms_lookup_name("filp_close");
+			uint64_t _cfu_addr = sym_parser.kallsyms_lookup_name("_copy_from_user");
+			if (!_cfu_addr) _cfu_addr = sym_parser.kallsyms_lookup_name("copy_from_user");
+			if (!_cfu_addr) _cfu_addr = sym_parser.kallsyms_lookup_name("__arch_copy_from_user");
 
 			std::cout << std::endl << "=== KPM Loader Integration ===" << std::endl;
 
-			SymbolRegion kpm_region = {0, 0};
-			auto check_r = [&](SymbolRegion r) { if (r.size > kpm_region.size) kpm_region = r; };
-			if (sym.__cfi_check.valid()) check_r(sym.__cfi_check);
-			if (sym.die.valid()) check_r(sym.die);
-			if (sym.__drm_puts_coredump.valid()) check_r(sym.__drm_puts_coredump);
-			if (sym.__drm_printfn_coredump.valid()) check_r(sym.__drm_printfn_coredump);
+			std::vector<ReservedRange> kpm_reserved_ranges = build_kpm_reserved_ranges(sym);
+				SymbolRegion kpm_region = find_zero_code_cave(file_buf, sym._stext ? sym._stext : 0x10000, sym._etext ? sym._etext : file_buf.size(), kpm_required_space(), kpm_reserved_ranges);
+				if (kpm_region.valid()) {
+					std::cout << "KPM code cave: 0x" << std::hex << kpm_region.offset
+						<< ", size:0x" << kpm_region.size << std::endl;
+				}
 
-			if (kpm_region.size >= 0x4000) {
+			if (kpm_region.valid() && kpm_region.size >= kpm_required_space()) {
 				KpmEmbedConfig kcfg{};
 				kcfg.kernel_file_buf = &file_buf;
 				kcfg.cred_offset = off.cred_offset;
@@ -298,8 +414,18 @@ int main(int argc, char* argv[]) {
 
 				KernelVersionParser kvp(file_buf);
 				kcfg.has_syscall_wrapper = !kvp.is_kernel_version_less("4.17.0");
-				kcfg.kernel_version_str = nullptr;
-				kcfg.kallsyms_lookup_name_addr = 0;
+				PatchDoExecve tmpDoExecve(tmpBase, sym);
+				kcfg.execve_filename_reg = tmpDoExecve.get_execve_filename_reg();
+				kcfg.execve_filename_is_direct = tmpDoExecve.is_execve_filename_direct();
+				kcfg.kernel_version_str = (const char*)find_kernel_version_string_offset(file_buf);
+				kcfg.kallsyms_lookup_name_addr = _kln_addr;
+					if (!_kln_addr) {
+						std::cout << "[WARNING] kallsyms_lookup_name not resolved; KPM external symbols will fail-fast" << std::endl;
+					}
+				kcfg.kernel_va_base = sym_parser.kernel_base();
+				if (kcfg.kernel_va_base) {
+					std::cout << "kernel VA base: 0x" << std::hex << kcfg.kernel_va_base << std::endl;
+				}
 				kcfg.kmalloc_addr = _km_addr;
 				kcfg.kfree_addr = _kf_addr;
 				kcfg.vmalloc_addr = _vm_addr;
@@ -312,6 +438,7 @@ int main(int argc, char* argv[]) {
 				kcfg.filp_open_addr = _fo_addr;
 				kcfg.kernel_read_addr = _kr_addr;
 				kcfg.filp_close_addr = _fc_addr;
+				kcfg.copy_from_user_addr = _cfu_addr;
 				kcfg.kti_addr = off.huawei_kti_addr;
 
 				KpmEmbedResult kr = kpm_embed_loader(kcfg, kpm_region);
@@ -334,19 +461,27 @@ int main(int argc, char* argv[]) {
 	PatchKernelResult pr = patch_kernel_handler(file_buf, off, sym, vec_patch_bytes_data, kpm_handler_addr);
 	if (!pr.patched) {
 		std::cout << "Failed to find hook start addr" << std::endl;
-		system("pause");
+		wait_before_exit();
 		return 0;
 	}
 
 	std::string str_root_key;
 	size_t is_need_create_root_key = 0;
 	std::cout << std::endl << "请选择是否需要自动随机生成ROOT密匙（1需要；2不需要）：" << std::endl;
-	std::cin >> std::dec >> is_need_create_root_key;
+	if (!(std::cin >> std::dec >> is_need_create_root_key)) {
+		std::cout << "输入已结束，未写入文件。" << std::endl;
+		wait_before_exit();
+		return 1;
+	}
 	if (is_need_create_root_key == 1) {
 		str_root_key = generate_random_str(ROOT_KEY_LEN);
 	} else {
 		std::cout << "请输入ROOT密匙（48个字符的字符串，包含大小写和数字）：" << std::endl;
-		std::cin >> str_root_key;
+		if (!(std::cin >> str_root_key) || str_root_key.empty()) {
+			std::cout << "ROOT 密匙为空，未写入文件。" << std::endl;
+			wait_before_exit();
+			return 1;
+		}
 		std::cout << std::endl;
 	}
 	std::string write_key = str_root_key;
@@ -357,11 +492,15 @@ int main(int argc, char* argv[]) {
 
 	size_t need_write_modify_in_file = 0;
 	std::cout << "#是否需要立即写入修改到文件？（1需要；2不需要）：" << std::endl;
-	std::cin >> need_write_modify_in_file;
+	if (!(std::cin >> need_write_modify_in_file)) {
+		std::cout << "输入已结束，未写入文件。" << std::endl;
+		wait_before_exit();
+		return 1;
+	}
 	if (need_write_modify_in_file == 1) {
 		std::cout << "#正在写入，请稍后..." << std::endl;
 		write_all_patch(file_path, vec_patch_bytes_data);
 	}
-	system("pause");
+	wait_before_exit();
 	return 0;
 }
